@@ -61,14 +61,35 @@ function read_all {
   fi
 }
 
+function verify_datapoint {
+  namespace=$1
+  id=$2
+  ts=$3
+  expected_value=$4
+
+  received_value=$(curl -sSf -X POST 0.0.0.0:9003/fetch -d '{
+    "namespace": "'"$namespace"'",
+    "id": "'"$id"'",
+    "rangeStart": '"$ts"',
+    "rangeEnd":'"$((ts + 1))"'
+  }' | jq '.datapoints[0].value')
+
+  if [[ "$received_value" == "$expected_value" ]]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
 echo "Write data for 'now - 2 * bufferPast' (testing cold writes from memory)"
 write_data "coldWritesRepairAndNoIndex" "foo" "$(($(date +"%s") - 60 * 10 * 2))" 12.3456789
 
 echo "Expect to read 1 datapoint"
 read_all "coldWritesRepairAndNoIndex" "foo" 1
 
+cold_write_ts="$(($(date +"%s") - 60 * 60 * 2))"
 echo "Write data for 'now - 2 * blockSize' (testing compaction to disk)"
-write_data "coldWritesRepairAndNoIndex" "foo" "$(($(date +"%s") - 60 * 60 * 2))" 98.7654321
+write_data "coldWritesRepairAndNoIndex" "foo" "$cold_write_ts" 98.7654321
 
 echo "Wait until cold writes are flushed"
 ATTEMPTS=10 MAX_TIMEOUT=4 TIMEOUT=1 retry_with_backoff  \
@@ -83,3 +104,16 @@ ATTEMPTS=10 TIMEOUT=2 retry_with_backoff  \
 
 echo "Expect to read 2 datapoints"
 read_all "coldWritesRepairAndNoIndex" "foo" 2
+
+echo "Verify cold write gets upserted and merged from disk"
+write_data "coldWritesRepairAndNoIndex" "foo" "$cold_write_ts" 42.42
+verify_datapoint "coldWritesRepairAndNoIndex" "foo" "$cold_write_ts" 42.42
+
+upsert_ts="$(date +"%s")"
+echo "Verify data gets upserted and merged on quick successive writes"
+write_data "coldWritesRepairAndNoIndex" "foo" "$upsert_ts" 11.11
+write_data "coldWritesRepairAndNoIndex" "foo" "$upsert_ts" 22.22
+write_data "coldWritesRepairAndNoIndex" "foo" "$upsert_ts" 33.33
+write_data "coldWritesRepairAndNoIndex" "foo" "$upsert_ts" 44.44
+write_data "coldWritesRepairAndNoIndex" "foo" "$upsert_ts" 55.55
+verify_datapoint "coldWritesRepairAndNoIndex" "foo" "$upsert_ts" 55.55
